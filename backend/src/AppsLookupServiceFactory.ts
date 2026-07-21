@@ -1,9 +1,10 @@
 import { AppsStorageManager } from './AppsStorageManager.js'
 import { AdmissionMode, LookupFormula, LookupQuestion, LookupService, OutputAdmittedByTopic, OutputSpent, SpendNotificationMode } from '@bsv/overlay'
-import { LookupAnswer, PushDrop, Utils } from '@bsv/sdk'
+import { PushDrop, Utils } from '@bsv/sdk'
 import docs from './docs/AppsLookupDocs.md.js'
 import { Db } from 'mongodb'
-import { AppCatalogQuery, PublishedAppMetadata } from './types.js'
+import { normalizeAppMetadata, PublishedAppMetadata } from 'metanet-apps'
+import { AppCatalogQuery } from './types.js'
 
 /**
  * Implements a lookup service for App tokens
@@ -16,9 +17,9 @@ class AppsLookupService implements LookupService {
   private static readonly TOPIC = 'tm_apps'
   private static readonly SERVICE_ID = 'ls_apps'
 
-  constructor(public storageManager: AppsStorageManager) { }
+  constructor (public storageManager: AppsStorageManager) { }
 
-  async outputAdmittedByTopic(payload: OutputAdmittedByTopic): Promise<void> {
+  async outputAdmittedByTopic (payload: OutputAdmittedByTopic): Promise<void> {
     if (payload.mode !== 'locking-script') throw new Error('Invalid payload')
     const { txid, outputIndex, topic, lockingScript } = payload
     if (topic !== AppsLookupService.TOPIC) return
@@ -41,18 +42,8 @@ class AppsLookupService implements LookupService {
     if (metadata == null) {
       throw new Error('App token must contain valid metadata')
     }
-    if (
-      typeof metadata?.version !== 'string' ||
-      typeof metadata.name !== 'string' ||
-      typeof metadata.description !== 'string' ||
-      typeof metadata.icon !== 'string' ||
-      !(typeof metadata.httpURL === 'string' || typeof metadata.uhrpURL === 'string') ||
-      typeof metadata.domain !== 'string' ||
-      typeof metadata.publisher !== 'string' ||
-      typeof metadata.release_date !== 'string'
-    ) {
-      throw new Error('App metadata missing required fields')
-    }
+    const normalized = normalizeAppMetadata(metadata)
+    if (normalized.publisher === undefined) throw new Error('App metadata missing publisher')
 
     console.log(
       'Apps lookup service is storing a record',
@@ -61,21 +52,21 @@ class AppsLookupService implements LookupService {
     )
 
     // Store App record
-    await this.storageManager.storeRecord(txid, outputIndex, metadata)
+    await this.storageManager.storeRecord(txid, outputIndex, metadata, normalized)
   }
 
-  async outputSpent(payload: OutputSpent): Promise<void> {
+  async outputSpent (payload: OutputSpent): Promise<void> {
     if (payload.mode !== 'none') throw new Error('Invalid payload')
     const { topic, txid, outputIndex } = payload
     if (topic !== AppsLookupService.TOPIC) return
     await this.storageManager.deleteRecord(txid, outputIndex)
   }
 
-  async outputEvicted(txid: string, outputIndex: number): Promise<void> {
+  async outputEvicted (txid: string, outputIndex: number): Promise<void> {
     await this.storageManager.deleteRecord(txid, outputIndex)
   }
 
-  async lookup(question: LookupQuestion): Promise<LookupFormula> {
+  async lookup (question: LookupQuestion): Promise<LookupFormula> {
     if (question.query === undefined || question.query === null) {
       throw new Error('A valid query must be provided!')
     }
@@ -86,7 +77,7 @@ class AppsLookupService implements LookupService {
     const query = (question.query as AppCatalogQuery)
 
     // --- Domain lookup -----------------------------------------------------
-    if (query.domain) {
+    if (query.domain !== undefined && query.domain !== '') {
       return await this.storageManager.findByDomain(
         query.domain,
         query.limit,
@@ -96,7 +87,7 @@ class AppsLookupService implements LookupService {
     }
 
     // --- Publisher lookup --------------------------------------------------
-    if (query.publisher) {
+    if (query.publisher !== undefined && query.publisher !== '') {
       return await this.storageManager.findByPublisher(
         query.publisher,
         query.limit,
@@ -106,7 +97,7 @@ class AppsLookupService implements LookupService {
     }
 
     // --- Tag lookup --------------------------------------------------------
-    if (query.tags?.length) {
+    if (query.tags !== undefined && query.tags.length > 0) {
       return await this.storageManager.findByTags(
         query.tags,
         query.limit,
@@ -116,7 +107,7 @@ class AppsLookupService implements LookupService {
     }
 
     // --- Category lookup ---------------------------------------------------
-    if (query.category) {
+    if (query.category !== undefined && query.category !== '') {
       return await this.storageManager.findByCategory(
         query.category,
         query.limit,
@@ -126,7 +117,7 @@ class AppsLookupService implements LookupService {
     }
 
     // --- Fuzzy name lookup -------------------------------------------------
-    if (query.name) {
+    if (query.name !== undefined && query.name !== '') {
       return await this.storageManager.findByNameFuzzy(
         query.name,
         query.limit,
@@ -136,7 +127,7 @@ class AppsLookupService implements LookupService {
     }
 
     // --- Outpoint lookup ---------------------------------------------------
-    if (query.outpoint) {
+    if (query.outpoint !== undefined && query.outpoint !== '') {
       return await this.storageManager.findByOutpoint(query.outpoint)
     }
 
@@ -148,11 +139,11 @@ class AppsLookupService implements LookupService {
     )
   }
 
-  async getDocumentation(): Promise<string> {
+  async getDocumentation (): Promise<string> {
     return docs
   }
 
-  async getMetaData(): Promise<{
+  async getMetaData (): Promise<{
     name: string
     shortDescription: string
     iconURL?: string

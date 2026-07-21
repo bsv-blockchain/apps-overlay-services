@@ -1,8 +1,13 @@
 import { AdmittanceInstructions, TopicManager } from '@bsv/overlay'
 import { PushDrop, Transaction, Utils } from '@bsv/sdk'
 import docs from './docs/AppsTopicManagerDocs.md.js'
-import { PublishedAppMetadata } from 'mod.js'
-import { isTokenSignatureCorrectlyLinked } from './isTokenSignatureCorrectlyLinked.js'
+import {
+  AppMetadataValidationError,
+  normalizeAppMetadata,
+  PublishedAppMetadata
+} from 'metanet-apps'
+import { AppAdmissionError, AppAdmissionCode, logAdmission } from './admission.js'
+import { verifyTokenSignatureLink } from './isTokenSignatureCorrectlyLinked.js'
 
 /**
  * Implements a topic manager for App tokens
@@ -15,26 +20,32 @@ export default class AppsTopicManager implements TopicManager {
    * @param previousCoins - The previous coins to consider
    * @returns A promise that resolves with the admittance instructions
    */
-  async identifyAdmissibleOutputs(beef: number[], previousCoins: number[]): Promise<AdmittanceInstructions> {
+  async identifyAdmissibleOutputs (beef: number[], previousCoins: number[]): Promise<AdmittanceInstructions> {
     const outputsToAdmit: number[] = []
+    let txid: string | undefined
+    let rejectedOutputCount = 0
     try {
-      console.log('Apps topic manager was invoked')
       const parsedTransaction = Transaction.fromBEEF(beef)
+      txid = parsedTransaction.id('hex')
 
       // Validate params
-      if (!Array.isArray(parsedTransaction.inputs) || parsedTransaction.inputs.length < 1) throw new Error('Missing parameter: inputs')
-      if (!Array.isArray(parsedTransaction.outputs) || parsedTransaction.outputs.length < 1) throw new Error('Missing parameter: outputs')
-      console.log('Apps topic manager has parsed a the transaction: ', parsedTransaction.id('hex'))
+      if (!Array.isArray(parsedTransaction.inputs) || parsedTransaction.inputs.length < 1) throw new AppAdmissionError('ERR_TRANSACTION_INVALID', 'Transaction must contain an input')
+      if (!Array.isArray(parsedTransaction.outputs) || parsedTransaction.outputs.length < 1) throw new AppAdmissionError('ERR_TRANSACTION_INVALID', 'Transaction must contain an output')
 
       // Try to decode and validate transaction outputs
       for (const [i, output] of parsedTransaction.outputs.entries()) {
         // Decode the fields
         try {
-          const result = PushDrop.decode(output.lockingScript)
+          let result
+          try {
+            result = PushDrop.decode(output.lockingScript)
+          } catch {
+            throw new AppAdmissionError('ERR_OUTPUT_NOT_PUSH_DROP', 'Output is not a PushDrop token')
+          }
 
           // Check that there is exactly one field + signature
           if (result.fields.length !== 2) {
-            throw new Error('App token must have exactly one metadata field + signature')
+            throw new AppAdmissionError('ERR_METADATA_INVALID', 'App token must have exactly one metadata field and one signature')
           }
 
           const metadataJSON = Utils.toUTF8(result.fields[0])
@@ -42,66 +53,43 @@ export default class AppsTopicManager implements TopicManager {
           try {
             metadata = JSON.parse(metadataJSON)
           } catch {
-            throw new Error('Metadata field is not valid JSON')
+            throw new AppAdmissionError('ERR_METADATA_INVALID', 'Metadata field is not valid JSON')
           }
 
           if (metadata == null) {
-            throw new Error('App token must contain valid metadata')
+            throw new AppAdmissionError('ERR_METADATA_INVALID', 'App token must contain valid metadata')
           }
 
-          if (
-            typeof metadata?.version !== 'string' ||
-            typeof metadata.name !== 'string' ||
-            typeof metadata.description !== 'string' ||
-            typeof metadata.icon !== 'string' ||
-            !(typeof metadata.httpURL === 'string' || typeof metadata.uhrpURL === 'string') ||
-            typeof metadata.domain !== 'string' ||
-            typeof metadata.publisher !== 'string' ||
-            typeof metadata.release_date !== 'string'
-          ) {
-            throw new Error('App metadata missing required fields')
-          }
+          const normalized = normalizeAppMetadata(metadata)
+          if (normalized.publisher === undefined) throw new AppAdmissionError('ERR_PUBLISHER_MISSING', 'App metadata must include a publisher')
 
           // Check key linages
-          const isLinked = await isTokenSignatureCorrectlyLinked(result.lockingPublicKey, metadata.publisher, result.fields)
-          if (!isLinked) {
-            throw new Error('Signature is not properly linked')
-          }
+          const link = await verifyTokenSignatureLink(result.lockingPublicKey, normalized.publisher, result.fields)
+          if (!link.valid) throw new AppAdmissionError(link.code, 'App signature is not linked to the claimed publisher with the canonical key')
 
           outputsToAdmit.push(i)
         } catch (error) {
-          // It's common for other outputs to be invalid; no need to log an error here
-          continue
+          rejectedOutputCount++
+          const code: AppAdmissionCode = error instanceof AppAdmissionError
+            ? error.code
+            : error instanceof AppMetadataValidationError
+              ? error.code
+              : 'ERR_INTERNAL'
+          logAdmission({ event: 'apps.admission_rejected', txid, outputIndex: i, code })
         }
       }
-      if (outputsToAdmit.length === 0) {
-        throw new Error('Apps topic manager: no outputs admitted!')
-      }
-
-      // Returns an array of outputs admitted
-      // And previousOutputsRetained (none by default)
-      return {
-        outputsToAdmit,
-        coinsToRetain: []
-      }
     } catch (error) {
-      // Only log an error if no outputs were admitted and no previous coins consumed
-      if (outputsToAdmit.length === 0 && (previousCoins === undefined || previousCoins.length === 0)) {
-        console.error('Error identifying admissible outputs:', error)
-      }
+      const code: AppAdmissionCode = error instanceof AppAdmissionError ? error.code : 'ERR_TRANSACTION_INVALID'
+      logAdmission({ event: 'apps.admission_rejected', txid, code })
     }
 
-    if (outputsToAdmit.length > 0) {
-      console.log(`Admitted ${outputsToAdmit.length} App Catalog ${outputsToAdmit.length === 1 ? 'output' : 'outputs'}!`)
-    }
-
-    if (previousCoins !== undefined && previousCoins.length > 0) {
-      console.log(`Consumed ${previousCoins.length} previous App Catalog ${previousCoins.length === 1 ? 'coin' : 'coins'}!`)
-    }
-
-    if (outputsToAdmit.length === 0 && (previousCoins === undefined || previousCoins.length === 0)) {
-      console.warn('No App Catalog outputs admitted, and no previous App Catalog coins were consumed.')
-    }
+    logAdmission({
+      event: 'apps.admission_completed',
+      txid,
+      admittedOutputs: outputsToAdmit,
+      rejectedOutputCount,
+      previousCoinCount: previousCoins?.length ?? 0
+    })
 
     return {
       outputsToAdmit,
@@ -116,7 +104,7 @@ export default class AppsTopicManager implements TopicManager {
    * Get the documentation associated with this Apps topic manager
    * @returns A promise that resolves to a string containing the documentation
    */
-  async getDocumentation(): Promise<string> {
+  async getDocumentation (): Promise<string> {
     return docs
   }
 
@@ -125,7 +113,7 @@ export default class AppsTopicManager implements TopicManager {
    * @returns A promise that resolves to an object containing metadata
    * @throws An error indicating the method is not implemented
    */
-  async getMetaData(): Promise<{
+  async getMetaData (): Promise<{
     name: string
     shortDescription: string
     iconURL?: string
@@ -135,7 +123,7 @@ export default class AppsTopicManager implements TopicManager {
     return {
       name: 'Apps Topic Manager',
       shortDescription: 'Admits PushDrop tokens representing published Metanet Apps into an overlay.',
-      version: '0.1.0',
+      version: '1.1.0'
     }
   }
 }

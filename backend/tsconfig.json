@@ -2,7 +2,8 @@
   "files": [],
   "compilerOptions": {
     "esModuleInterop": true,
-    "module": "ESNext"
+    "module": "ESNext",
+    "strictNullChecks": true
   },
   "references": [
     {

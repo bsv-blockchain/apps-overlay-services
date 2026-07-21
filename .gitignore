@@ -3,3 +3,4 @@ build
 dist
 local-data
 cars_artifact_*.tgz
+*.tsbuildinfo

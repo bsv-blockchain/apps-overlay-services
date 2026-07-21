@@ -1,6 +1,7 @@
 import { Collection, Db } from 'mongodb'
 import { LookupFormula } from '@bsv/overlay'
-import { AppCatalogRecord, PublishedAppMetadata } from './types.js'
+import type { NormalizedPublishedAppMetadata, PublishedAppMetadata } from 'metanet-apps'
+import { AppCatalogRecord } from './types.js'
 
 /**
  * Storage manager for the on-chain Apps catalogue overlay.
@@ -11,7 +12,7 @@ export class AppsStorageManager {
   /**
    * @param db  A connected MongoDB database handle.
    */
-  constructor(private readonly db: Db) {
+  constructor (private readonly db: Db) {
     this.records = db.collection<AppCatalogRecord>('appsCatalogRecords')
 
     // Simple full-text index so callers can perform ad-hoc searches.
@@ -23,28 +24,38 @@ export class AppsStorageManager {
         'metadata.domain': 'text'
       })
       .catch(console.error)
+    this.records.createIndex({ txid: 1, outputIndex: 1 }, { unique: true }).catch(console.error)
+    this.records.createIndex({ 'normalizedMetadata.domain': 1 }).catch(console.error)
+    this.records.createIndex({ releasedAt: -1 }).catch(console.error)
   }
 
   /**
    * Insert a new app-token record.
    */
-  async storeRecord(
+  async storeRecord (
     txid: string,
     outputIndex: number,
-    metadata: PublishedAppMetadata
+    metadata: PublishedAppMetadata,
+    normalizedMetadata: NormalizedPublishedAppMetadata
   ): Promise<void> {
-    await this.records.insertOne({
-      txid,
-      outputIndex,
-      metadata,
-      createdAt: new Date()
-    })
+    await this.records.updateOne(
+      { txid, outputIndex },
+      {
+        $set: {
+          metadata,
+          normalizedMetadata,
+          releasedAt: new Date(normalizedMetadata.released_at)
+        },
+        $setOnInsert: { txid, outputIndex, createdAt: new Date() }
+      },
+      { upsert: true }
+    )
   }
 
   /**
    * Remove an app-token record identified by its UTXO.
    */
-  async deleteRecord(txid: string, outputIndex: number): Promise<void> {
+  async deleteRecord (txid: string, outputIndex: number): Promise<void> {
     await this.records.deleteOne({ txid, outputIndex })
   }
 
@@ -56,13 +67,15 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} Matching UTXO references
    */
-  async findByDomain(
-    domain: string, 
+  async findByDomain (
+    domain: string,
     limit: number = 50,
     skip: number = 0,
     sortOrder: 'asc' | 'desc' = 'desc'
   ): Promise<LookupFormula> {
-    return this.findRecordWithQuery({ 'metadata.domain': domain }, limit, skip, sortOrder)
+    return await this.findRecordWithQuery({
+      $or: [{ 'normalizedMetadata.domain': domain.toLowerCase() }, { 'metadata.domain': domain }]
+    }, limit, skip, sortOrder)
   }
 
   /**
@@ -73,13 +86,13 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} Matching UTXO references
    */
-  async findByPublisher(
+  async findByPublisher (
     publisher: string,
     limit: number = 50,
     skip: number = 0,
     sortOrder: 'asc' | 'desc' = 'desc'
   ): Promise<LookupFormula> {
-    return this.findRecordWithQuery({ 'metadata.publisher': publisher }, limit, skip, sortOrder)
+    return await this.findRecordWithQuery({ 'metadata.publisher': publisher }, limit, skip, sortOrder)
   }
 
   /**
@@ -88,16 +101,17 @@ export class AppsStorageManager {
    * @param {string} outpoint - Outpoint in format "txid.outputIndex"
    * @returns {Promise<LookupFormula>} Matching UTXO reference
    */
-  async findByOutpoint(outpoint: string): Promise<LookupFormula> {
+  async findByOutpoint (outpoint: string): Promise<LookupFormula> {
+    if (!/^[0-9a-f]{64}\.\d+$/i.test(outpoint)) throw new Error('Invalid outpoint format – expected "txid.outputIndex"')
     const [txid, indexStr] = outpoint.split('.')
     const outputIndex = Number(indexStr)
 
-    if (!txid || Number.isNaN(outputIndex)) {
+    if (txid === '' || Number.isNaN(outputIndex)) {
       throw new Error('Invalid outpoint format – expected "txid.outputIndex"')
     }
 
     // For outpoint lookup, we don't need pagination or sorting as it's a unique identifier
-    return this.findRecordWithQuery({ txid, outputIndex }, 1, 0, 'desc')
+    return await this.findRecordWithQuery({ txid, outputIndex }, 1, 0, 'desc')
   }
 
   /**
@@ -110,7 +124,7 @@ export class AppsStorageManager {
   * @param {string} sortOrder - Sort direction ('asc' or 'desc')
   * @returns {Promise<LookupFormula>} Matching UTXO references
   */
-  async findByNameFuzzy(
+  async findByNameFuzzy (
     partialName: string,
     limit: number = 50,
     skip: number = 0,
@@ -119,9 +133,9 @@ export class AppsStorageManager {
     // Escape regex metacharacters so user input is safe
     const escaped = partialName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const regex = new RegExp(escaped, 'i')
-    
+
     // Use findRecordWithQuery with the regex query
-    return this.findRecordWithQuery(
+    return await this.findRecordWithQuery(
       { 'metadata.name': { $regex: regex } },
       limit,
       skip,
@@ -155,13 +169,13 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} Matching UTXO references
    */
-  async findByTags(
+  async findByTags (
     tags: string[],
     limit: number = 50,
     skip: number = 0,
     sortOrder: 'asc' | 'desc' = 'desc'
   ): Promise<LookupFormula> {
-    return this.findRecordWithQuery(
+    return await this.findRecordWithQuery(
       { 'metadata.tags': { $in: tags } },
       limit,
       skip,
@@ -177,13 +191,13 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} Matching UTXO references
    */
-  async findByCategory(
+  async findByCategory (
     category: string,
     limit: number = 50,
     skip: number = 0,
     sortOrder: 'asc' | 'desc' = 'desc'
   ): Promise<LookupFormula> {
-    return this.findRecordWithQuery(
+    return await this.findRecordWithQuery(
       { 'metadata.category': category },
       limit,
       skip,
@@ -198,12 +212,12 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} All app UTXO references
    */
-  async findAllApps(
+  async findAllApps (
     limit: number = 50,
     skip: number = 0,
     sortOrder: 'asc' | 'desc' = 'desc'
   ): Promise<LookupFormula> {
-    return this.findRecordWithQuery({}, limit, skip, sortOrder)
+    return await this.findRecordWithQuery({}, limit, skip, sortOrder)
   }
 
   /**
@@ -214,7 +228,7 @@ export class AppsStorageManager {
    * @param {string} sortOrder - Sort direction ('asc' or 'desc')
    * @returns {Promise<LookupFormula>} returns matching UTXO references
    */
-  private async findRecordWithQuery(
+  private async findRecordWithQuery (
     query: object,
     limit: number = 50,
     skip: number = 0,
@@ -222,16 +236,18 @@ export class AppsStorageManager {
   ): Promise<LookupFormula> {
     // Apply sort on release_date (or other time-based field) for chronological ordering
     const sortDirection = sortOrder === 'desc' ? -1 : 1
-    
+    const safeLimit = Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 50, 1), 100)
+    const safeSkip = Math.min(Math.max(Number.isFinite(skip) ? Math.trunc(skip) : 0, 0), 10_000)
+
     // Find matching results from the DB with pagination and sorting
     const results = await this.records
       .find(query)
-      .sort({ 'metadata.release_date': sortDirection })
-      .skip(skip)
-      .limit(limit)
+      .sort({ releasedAt: sortDirection, 'metadata.release_date': sortDirection })
+      .skip(safeSkip)
+      .limit(safeLimit)
       .project({ txid: 1, outputIndex: 1 })
       .toArray()
-    
+
     return results.map((record: any) => {
       return {
         txid: record.txid,

@@ -1,0 +1,58 @@
+name: Quality and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apps-overlay-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 22.22.0
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix backend --ignore-scripts
+      - name: Verify overlay
+        run: |
+          npm run lint --prefix backend
+          npm test --prefix backend
+          npm audit --prefix backend --omit=dev --audit-level=high
+
+  deploy:
+    needs: quality
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    environment: production
+    runs-on:
+      - self-hosted
+      - evans-creek-local-deploy
+      - linux-amd64
+      - kubectl
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: 22.22.0
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Build CARS release artifact
+        run: npm run build
+      - name: Release primary overlay
+        env:
+          CARS_PRIVATE_KEY: ${{ secrets.CARS_PRIVATE_KEY }}
+        run: npx cars release now 2 --key "${CARS_PRIVATE_KEY}"
+      - name: Promote tested image to independent secondary
+        run: scripts/k8s/promote-secondary.sh

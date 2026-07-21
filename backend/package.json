@@ -23,10 +23,11 @@
     }
   },
   "scripts": {
-    "test": "npm run build && jest",
-    "test:watch": "npm run build && jest --watch",
-    "test:coverage": "npm run build && jest --coverage",
-    "lint": "ts-standard --fix src/**/*.ts",
+    "test": "npm run build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test:watch": "npm run build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "npm run build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js --coverage",
+    "lint": "ts-standard --project tsconfig.eslint.json src/**/*.ts",
+    "lint:fix": "ts-standard --project tsconfig.eslint.json --fix src/**/*.ts",
     "build": "tsc -b",
     "prepublish": "npm run build",
     "compile": "scrypt-cli c",
@@ -47,6 +48,7 @@
     "@bsv/overlay": "^2.0.2",
     "@bsv/sdk": "^2.0.7",
     "knex": "^3.1.0",
+    "metanet-apps": "https://github.com/bsv-blockchain/metanet-apps/releases/download/v1.1.0/metanet-apps-1.1.0.tgz",
     "mongodb": "^6.11.0"
   }
 }
