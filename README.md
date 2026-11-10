@@ -1,5 +1,14 @@
 # Apps Overlay Services
 
+> [!IMPORTANT]
+> This repository is deprecated and must not receive new protocol or runtime
+> changes. The canonical Apps topic manager and lookup service now live in
+> [`@bsv/overlay-topics`](https://github.com/bsv-blockchain/ts-stack/tree/main/packages/overlays/topics/src/apps),
+> with the deployable overlay server in
+> [`bsv-blockchain/ts-stack`](https://github.com/bsv-blockchain/ts-stack/tree/main/infra/overlay-server).
+> Existing operators should migrate to TS Stack. This repository remains
+> temporarily available only to document and support that runtime transition.
+
 Apps Overlay Services is a BSV overlay implementation that powers a decentralized, on-chain **Metanet App Catalog** using the PushDrop protocol.  
 It supports publishing and resolving app metadata using the standard BSV SDK TopicBroadcaster and LookupResolver.
 
@@ -26,4 +35,3 @@ Each published Metanet app is represented by a signed PushDrop token with the fo
 }
 ```
 Optional fields include: short_name, category, tags, banner_image_url, changelog, screenshot_urls.
-
