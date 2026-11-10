@@ -7,10 +7,11 @@
   "module": "dist/esm/mod.js",
   "types": "dist/types/mod.d.ts",
   "files": [
+    "NOTICE",
     "dist",
     "src",
     "mod.ts",
-    "LICENSE.txt"
+    "LICENSE"
   ],
   "exports": {
     ".": {
